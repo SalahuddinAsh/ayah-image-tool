@@ -1,21 +1,11 @@
 import 'dart:async';
 import 'dart:ui' as ui;
-import 'dart:js_interop';
-import 'dart:js_interop_unsafe';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:quran_library/quran_library.dart';
 
-@JS('Blob')
-extension type _JsBlob._(JSObject _) implements JSObject {
-  external factory _JsBlob(JSArray<JSAny> parts, JSObject options);
-}
-
-@JS('ClipboardItem')
-extension type _JsClipboardItem._(JSObject _) implements JSObject {
-  external factory _JsClipboardItem(JSObject items);
-}
+import 'src/platform_exporter.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -96,8 +86,8 @@ class _AyahImageScreenState extends State<AyahImageScreen> {
   Timer? _searchDebounce;
 
   // font size
-  double _fontSize = 40.0;
-  final _fontSizeCtrl = TextEditingController(text: '40');
+  double _fontSize = 14.0;
+  final _fontSizeCtrl = TextEditingController(text: '14');
 
   List<SurahNamesModel> get _surahs => QuranCtrl.instance.surahsList;
 
@@ -185,6 +175,9 @@ class _AyahImageScreenState extends State<AyahImageScreen> {
       await QuranFontsService.ensurePagesLoaded(p, radius: 0);
       await QuranCtrl.instance.prewarmQpcV4Pages(p - 1);
     }
+    // On web, wait for the browser to finish applying loaded fonts before
+    // rendering; on desktop this is a no-op (fonts load synchronously).
+    await waitForFonts();
     if (!mounted) return;
 
     final segs = <({int page, QpcV4WordSegment seg})>[];
@@ -467,7 +460,7 @@ class _AyahImageScreenState extends State<AyahImageScreen> {
                       ),
                       onChanged: (v) {
                         final d = double.tryParse(v);
-                        if (d != null && d >= 10 && d <= 100) {
+                        if (d != null && d >= 1 && d <= 100) {
                           setState(() => _fontSize = d);
                         }
                       },
@@ -475,9 +468,9 @@ class _AyahImageScreenState extends State<AyahImageScreen> {
                   ),
                   Expanded(
                     child: Slider(
-                      min: 10,
+                      min: 1,
                       max: 100,
-                      value: _fontSize.clamp(10.0, 100.0),
+                      value: _fontSize.clamp(1.0, 100.0),
                       onChanged: (v) {
                         setState(() => _fontSize = v);
                         _fontSizeCtrl.text = v.round().toString();
@@ -627,20 +620,7 @@ class _AyahColoringSectionState extends State<_AyahColoringSection> {
       final bytes = byteData!.buffer.asUint8List();
       if (!mounted) return;
 
-      final blobOptions = JSObject();
-      blobOptions['type'] = 'image/png'.toJS;
-      final jsBlob = _JsBlob([bytes.toJS as JSAny].toJS, blobOptions);
-
-      final clipInit = JSObject();
-      clipInit['image/png'] = jsBlob;
-      final clipItem = _JsClipboardItem(clipInit);
-
-      final nav = globalContext['navigator'] as JSObject;
-      final clipboard = nav['clipboard'] as JSObject;
-      await clipboard.callMethodVarArgs<JSPromise<JSAny?>>(
-        'write'.toJS,
-        [[clipItem as JSAny].toJS],
-      ).toDart;
+      await copyImageToClipboard(bytes);
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -653,7 +633,45 @@ class _AyahColoringSectionState extends State<_AyahColoringSection> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('تعذّر النسخ — جرب Chrome أو حدّث المتصفح'),
+          content: Text('تعذّر النسخ'),
+          duration: Duration(seconds: 3),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _capturing = false);
+    }
+  }
+
+  Future<void> _saveImage() async {
+    setState(() {
+      _capturing = true;
+      _selectedWords.clear();
+    });
+    await Future.delayed(const Duration(milliseconds: 200));
+    try {
+      final boundary = _repaintKey.currentContext!.findRenderObject()!
+          as RenderRepaintBoundary;
+      final image = await boundary.toImage(pixelRatio: 4.0);
+      final byteData =
+          await image.toByteData(format: ui.ImageByteFormat.png);
+      final bytes = byteData!.buffer.asUint8List();
+      if (!mounted) return;
+
+      final filename = 'ayah_${widget.surah}_${widget.ayahStart}.png';
+      final savedPath = await saveImageToFile(bytes, filename);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('تم الحفظ: $savedPath'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('تعذّر الحفظ'),
           duration: Duration(seconds: 3),
         ),
       );
@@ -734,17 +752,31 @@ class _AyahColoringSectionState extends State<_AyahColoringSection> {
 
         const SizedBox(height: 12),
 
-        FilledButton.icon(
-          onPressed: _capturing ? null : _copyImage,
-          icon: _capturing
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Colors.white),
-                )
-              : const Icon(Icons.content_copy_rounded, size: 18),
-          label: const Text('نسخ الصورة'),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: _capturing ? null : _copyImage,
+                icon: _capturing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Icon(Icons.content_copy_rounded, size: 18),
+                label: const Text('نسخ'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _capturing ? null : _saveImage,
+                icon: const Icon(Icons.download_rounded, size: 18),
+                label: const Text('حفظ PNG'),
+              ),
+            ),
+          ],
         ),
       ],
     );
